@@ -210,7 +210,7 @@ BloomFilter* BloomFilterBuilderImpl::CreateBloomFilter(int32_t column_ordinal) {
 
   CheckState(column_ordinal);
 
-  auto& curr_rg_bfs = *bloom_filters_.rbegin();
+  auto& curr_rg_bfs = bloom_filters_.back();
   if (curr_rg_bfs.find(column_ordinal) != curr_rg_bfs.cend()) {
     std::stringstream ss;
     ss << "Bloom filter already exists for column: " << column_ordinal

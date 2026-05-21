@@ -261,9 +261,8 @@ class PARQUET_EXPORT ColumnProperties {
           std::to_string(bloom_filter_options.fpp));
     }
     if (bloom_filter_options.ndv.has_value() && bloom_filter_options.ndv.value() < 0) {
-      throw ParquetException(
-          "Bloom filter number of distinct values must be >= 0, got " +
-          std::to_string(bloom_filter_options.ndv.value()));
+      throw ParquetException("Bloom filter number of distinct values must be >= 0, got " +
+                             std::to_string(bloom_filter_options.ndv.value()));
     }
     bloom_filter_options_ = bloom_filter_options;
   }
