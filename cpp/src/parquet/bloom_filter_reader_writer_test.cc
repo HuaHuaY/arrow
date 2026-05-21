@@ -93,7 +93,7 @@ TEST(BloomFilterBuilder, BasicRoundTrip) {
 
   BloomFilterOptions bloom_filter_options{100, 0.05};
   const auto bitset_size = BlockSplitBloomFilter::OptimalNumOfBytes(
-      bloom_filter_options.ndv, bloom_filter_options.fpp);
+      bloom_filter_options.ndv.value(), bloom_filter_options.fpp);
   WriterProperties::Builder properties_builder;
   properties_builder.enable_bloom_filter("c1", bloom_filter_options);
   auto writer_properties = properties_builder.build();
@@ -147,6 +147,53 @@ TEST(BloomFilterBuilder, BasicRoundTrip) {
     for (uint64_t hash : c.non_existing_values) {
       EXPECT_FALSE(filter.FindHash(hash));
     }
+  }
+}
+
+TEST(BloomFilterBuilder, FoldsOverestimatedNdvBeforeWriting) {
+  SchemaDescriptor schema;
+  schema::NodePtr root =
+      schema::GroupNode::Make("schema", Repetition::REPEATED, {schema::ByteArray("c1")});
+  schema.Init(root);
+
+  BloomFilterOptions bloom_filter_options{.ndv = 1'000'000, .fpp = 0.05};
+  const auto initial_bitset_size = BlockSplitBloomFilter::OptimalNumOfBytes(
+      bloom_filter_options.ndv.value(), bloom_filter_options.fpp);
+  WriterProperties::Builder properties_builder;
+  properties_builder.enable_bloom_filter("c1", bloom_filter_options);
+  auto writer_properties = properties_builder.build();
+  auto bloom_filter_builder = BloomFilterBuilder::Make(&schema, writer_properties.get());
+
+  bloom_filter_builder->AppendRowGroup();
+  auto bloom_filter = bloom_filter_builder->CreateBloomFilter(/*column_ordinal=*/0);
+  ASSERT_NE(bloom_filter, nullptr);
+  ASSERT_EQ(initial_bitset_size, bloom_filter->GetBitsetSize());
+
+  std::vector<uint64_t> hashes;
+  hashes.reserve(1000);
+  for (int32_t i = 0; i < 1000; ++i) {
+    const auto hash = bloom_filter->Hash(i);
+    hashes.push_back(hash);
+    bloom_filter->InsertHash(hash);
+  }
+
+  auto sink = CreateOutputStream();
+  auto locations = bloom_filter_builder->WriteTo(sink.get());
+  ASSERT_EQ(locations.size(), 1);
+  ASSERT_OK_AND_ASSIGN(auto buffer, sink->Finish());
+
+  const auto& location = locations.front().second;
+  ReaderProperties reader_properties;
+  ::arrow::io::BufferReader reader(
+      ::arrow::SliceBuffer(buffer, location.offset, location.length));
+  auto folded_filter =
+      parquet::BlockSplitBloomFilter::Deserialize(reader_properties, &reader);
+
+  EXPECT_LT(folded_filter.GetBitsetSize(), initial_bitset_size);
+  EXPECT_EQ(BlockSplitBloomFilter::OptimalNumOfBytes(1000, bloom_filter_options.fpp),
+            folded_filter.GetBitsetSize());
+  for (uint64_t hash : hashes) {
+    EXPECT_TRUE(folded_filter.FindHash(hash));
   }
 }
 

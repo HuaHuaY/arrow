@@ -185,8 +185,12 @@ class BloomFilterBuilderImpl : public BloomFilterBuilder {
   const WriterProperties* properties_;
   bool finished_ = false;
 
-  using RowGroupBloomFilters =
-      std::map</*column_id=*/int32_t, std::shared_ptr<BloomFilter>>;
+  struct BloomFilterEntry {
+    std::unique_ptr<BlockSplitBloomFilter> filter;
+    double target_fpp;
+  };
+
+  using RowGroupBloomFilters = std::map</*column_id=*/int32_t, BloomFilterEntry>;
   std::vector<RowGroupBloomFilters> bloom_filters_;  // indexed by row group ordinal
 };
 
@@ -214,9 +218,13 @@ BloomFilter* BloomFilterBuilderImpl::CreateBloomFilter(int32_t column_ordinal) {
     throw ParquetException(ss.str());
   }
 
+  ARROW_DCHECK(opts->ndv.has_value());
   auto bf = std::make_unique<BlockSplitBloomFilter>(properties_->memory_pool());
-  bf->Init(BlockSplitBloomFilter::OptimalNumOfBytes(opts->ndv, opts->fpp));
-  return curr_rg_bfs.emplace(column_ordinal, std::move(bf)).first->second.get();
+  bf->Init(BlockSplitBloomFilter::OptimalNumOfBytes(opts->ndv.value(), opts->fpp));
+  return curr_rg_bfs
+      .emplace(column_ordinal,
+               BloomFilterEntry{.filter = std::move(bf), .target_fpp = opts->fpp})
+      .first->second.filter.get();
 }
 
 IndexLocations BloomFilterBuilderImpl::WriteTo(::arrow::io::OutputStream* sink) {
@@ -229,10 +237,11 @@ IndexLocations BloomFilterBuilderImpl::WriteTo(::arrow::io::OutputStream* sink) 
 
   for (size_t i = 0; i != bloom_filters_.size(); ++i) {
     auto& row_group_bloom_filters = bloom_filters_[i];
-    for (const auto& [column_id, filter] : row_group_bloom_filters) {
+    for (auto& [column_id, entry] : row_group_bloom_filters) {
       // TODO(GH-43138): Determine the quality of bloom filter before writing it.
       PARQUET_ASSIGN_OR_THROW(int64_t offset, sink->Tell());
-      filter->WriteTo(sink);
+      entry.filter->FoldToTargetFpp(entry.target_fpp);
+      entry.filter->WriteTo(sink);
       PARQUET_ASSIGN_OR_THROW(int64_t pos, sink->Tell());
 
       if (pos - offset > std::numeric_limits<int32_t>::max()) {

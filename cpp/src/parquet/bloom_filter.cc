@@ -15,6 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <bit>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -345,9 +347,75 @@ void BlockSplitBloomFilter::WriteTo(ArrowOutputStream* sink) const {
   PARQUET_THROW_NOT_OK(sink->Write(data_->data(), num_bytes_));
 }
 
+void BlockSplitBloomFilter::FoldToTargetFpp(double target_fpp) {
+  const uint32_t num_folds = NumFoldsForTargetFpp(target_fpp);
+  if (num_folds > 0) {
+    Fold(num_folds);
+  }
+}
+
+uint32_t BlockSplitBloomFilter::NumFoldsForTargetFpp(double target_fpp) const {
+  const uint32_t num_blocks = NumBlocks();
+  if (num_blocks < 2) {
+    return 0;
+  }
+  DCHECK_EQ(num_blocks & (num_blocks - 1), 0);
+
+  uint64_t total_set_bits = 0;
+  const auto* bitset32 = reinterpret_cast<const uint32_t*>(data_->data());
+  const uint32_t num_words = num_bytes_ / static_cast<uint32_t>(sizeof(uint32_t));
+  for (uint32_t i = 0; i < num_words; ++i) {
+    total_set_bits += static_cast<uint64_t>(std::popcount(bitset32[i]));
+  }
+
+  const double avg_fill =
+      static_cast<double>(total_set_bits) / (static_cast<double>(num_blocks) * 256.0);
+  const auto max_folds = static_cast<uint32_t>(std::countr_zero(num_blocks));
+
+  if (avg_fill == 0.0) {
+    return max_folds;
+  }
+
+  uint32_t num_folds = 0;
+  double one_minus_fk = 1.0 - avg_fill;
+  for (uint32_t i = 0; i < max_folds; ++i) {
+    one_minus_fk *= one_minus_fk;
+    const double fk = 1.0 - one_minus_fk;
+    const double estimated_fpp = std::pow(fk, kBitsSetPerBlock);
+    if (estimated_fpp > target_fpp) {
+      break;
+    }
+    ++num_folds;
+  }
+  return num_folds;
+}
+
+void BlockSplitBloomFilter::Fold(uint32_t num_folds) {
+  DCHECK_GT(num_folds, 0);
+
+  const uint32_t num_blocks = NumBlocks();
+  const uint32_t group_size = UINT32_C(1) << num_folds;
+  DCHECK_LE(group_size, num_blocks);
+
+  const uint32_t new_num_blocks = num_blocks / group_size;
+  auto* bitset32 = reinterpret_cast<uint32_t*>(data_->mutable_data());
+
+  for (uint32_t dst_block = 0; dst_block < new_num_blocks; ++dst_block) {
+    const uint32_t src_block = dst_block * group_size;
+    for (int word = 0; word < kBitsSetPerBlock; ++word) {
+      uint32_t merged = bitset32[src_block * kBitsSetPerBlock + word];
+      for (uint32_t fold_block = 1; fold_block < group_size; ++fold_block) {
+        merged |= bitset32[(src_block + fold_block) * kBitsSetPerBlock + word];
+      }
+      bitset32[dst_block * kBitsSetPerBlock + word] = merged;
+    }
+  }
+
+  num_bytes_ = new_num_blocks * kBytesPerFilterBlock;
+}
+
 bool BlockSplitBloomFilter::FindHash(uint64_t hash) const {
-  const uint32_t bucket_index =
-      static_cast<uint32_t>(((hash >> 32) * (num_bytes_ / kBytesPerFilterBlock)) >> 32);
+  const uint32_t bucket_index = static_cast<uint32_t>(((hash >> 32) * NumBlocks()) >> 32);
   const uint32_t key = static_cast<uint32_t>(hash);
   const uint32_t* bitset32 = reinterpret_cast<const uint32_t*>(data_->data());
 
@@ -363,8 +431,7 @@ bool BlockSplitBloomFilter::FindHash(uint64_t hash) const {
 }
 
 void BlockSplitBloomFilter::InsertHashImpl(uint64_t hash) {
-  const uint32_t bucket_index =
-      static_cast<uint32_t>(((hash >> 32) * (num_bytes_ / kBytesPerFilterBlock)) >> 32);
+  const uint32_t bucket_index = static_cast<uint32_t>(((hash >> 32) * NumBlocks()) >> 32);
   const uint32_t key = static_cast<uint32_t>(hash);
   uint32_t* bitset32 = reinterpret_cast<uint32_t*>(data_->mutable_data());
 
