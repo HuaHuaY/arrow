@@ -185,12 +185,21 @@ class BloomFilterBuilderImpl : public BloomFilterBuilder {
   const WriterProperties* properties_;
   bool finished_ = false;
 
-  struct BloomFilterEntry {
-    std::unique_ptr<BlockSplitBloomFilter> filter;
-    double target_fpp;
+  struct RowGroupBloomFilters {
+    RowGroupBloomFilters() = default;
+    RowGroupBloomFilters(RowGroupBloomFilters&&) noexcept = default;
+    RowGroupBloomFilters& operator=(RowGroupBloomFilters&&) noexcept = default;
+    RowGroupBloomFilters(const RowGroupBloomFilters&) = delete;
+    RowGroupBloomFilters& operator=(const RowGroupBloomFilters&) = delete;
+
+    struct BloomFilterEntry {
+      std::unique_ptr<BlockSplitBloomFilter> filter;
+      double target_fpp;
+    };
+
+    std::map</*column_id=*/int32_t, BloomFilterEntry> entries;
   };
 
-  using RowGroupBloomFilters = std::map</*column_id=*/int32_t, BloomFilterEntry>;
   std::vector<RowGroupBloomFilters> bloom_filters_;  // indexed by row group ordinal
 };
 
@@ -210,7 +219,7 @@ BloomFilter* BloomFilterBuilderImpl::CreateBloomFilter(int32_t column_ordinal) {
 
   CheckState(column_ordinal);
 
-  auto& curr_rg_bfs = bloom_filters_.back();
+  auto& curr_rg_bfs = bloom_filters_.back().entries;
   if (curr_rg_bfs.find(column_ordinal) != curr_rg_bfs.cend()) {
     std::stringstream ss;
     ss << "Bloom filter already exists for column: " << column_ordinal
@@ -223,7 +232,8 @@ BloomFilter* BloomFilterBuilderImpl::CreateBloomFilter(int32_t column_ordinal) {
   bf->Init(BlockSplitBloomFilter::OptimalNumOfBytes(opts->ndv.value(), opts->fpp));
   return curr_rg_bfs
       .emplace(column_ordinal,
-               BloomFilterEntry{.filter = std::move(bf), .target_fpp = opts->fpp})
+               RowGroupBloomFilters::BloomFilterEntry{.filter = std::move(bf),
+                                                      .target_fpp = opts->fpp})
       .first->second.filter.get();
 }
 
@@ -236,7 +246,7 @@ IndexLocations BloomFilterBuilderImpl::WriteTo(::arrow::io::OutputStream* sink) 
   IndexLocations locations;
 
   for (size_t i = 0; i != bloom_filters_.size(); ++i) {
-    auto& row_group_bloom_filters = bloom_filters_[i];
+    auto& row_group_bloom_filters = bloom_filters_[i].entries;
     for (auto& [column_id, entry] : row_group_bloom_filters) {
       // TODO(GH-43138): Determine the quality of bloom filter before writing it.
       PARQUET_ASSIGN_OR_THROW(int64_t offset, sink->Tell());
