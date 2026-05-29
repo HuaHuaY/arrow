@@ -91,7 +91,7 @@ TEST(BloomFilterBuilder, BasicRoundTrip) {
       "schema", Repetition::REPEATED, {schema::ByteArray("c1"), schema::ByteArray("c2")});
   schema.Init(root);
 
-  BloomFilterOptions bloom_filter_options{100, 0.05};
+  BloomFilterOptions bloom_filter_options{.ndv = 100, .fpp = 0.05};
   const auto bitset_size = BlockSplitBloomFilter::OptimalNumOfBytes(
       bloom_filter_options.ndv.value(), bloom_filter_options.fpp);
   WriterProperties::Builder properties_builder;
@@ -150,13 +150,31 @@ TEST(BloomFilterBuilder, BasicRoundTrip) {
   }
 }
 
-TEST(BloomFilterBuilder, FoldsOverestimatedNdvBeforeWriting) {
+namespace {
+
+struct BloomFilterBuilderFoldingTestCase {
+  int64_t ndv;
+  bool fold;
+  int32_t inserted_count;
+  int64_t expected_bitset_ndv;
+};
+
+class BloomFilterBuilderFoldingTest
+    : public ::testing::TestWithParam<BloomFilterBuilderFoldingTestCase> {};
+
+}  // namespace
+
+TEST_P(BloomFilterBuilderFoldingTest, RespectsOption) {
+  const auto& test_case = GetParam();
+
   SchemaDescriptor schema;
   schema::NodePtr root =
       schema::GroupNode::Make("schema", Repetition::REPEATED, {schema::ByteArray("c1")});
   schema.Init(root);
 
-  BloomFilterOptions bloom_filter_options{.ndv = 1'000'000, .fpp = 0.05};
+  constexpr double kFpp = 0.05;
+  BloomFilterOptions bloom_filter_options{
+      .ndv = test_case.ndv, .fpp = kFpp, .fold = test_case.fold};
   const auto initial_bitset_size = BlockSplitBloomFilter::OptimalNumOfBytes(
       bloom_filter_options.ndv.value(), bloom_filter_options.fpp);
   WriterProperties::Builder properties_builder;
@@ -170,8 +188,8 @@ TEST(BloomFilterBuilder, FoldsOverestimatedNdvBeforeWriting) {
   ASSERT_EQ(initial_bitset_size, bloom_filter->GetBitsetSize());
 
   std::vector<uint64_t> hashes;
-  hashes.reserve(1000);
-  for (int32_t i = 0; i < 1000; ++i) {
+  hashes.reserve(test_case.inserted_count);
+  for (int32_t i = 0; i < test_case.inserted_count; ++i) {
     const auto hash = bloom_filter->Hash(i);
     hashes.push_back(hash);
     bloom_filter->InsertHash(hash);
@@ -186,16 +204,29 @@ TEST(BloomFilterBuilder, FoldsOverestimatedNdvBeforeWriting) {
   ReaderProperties reader_properties;
   ::arrow::io::BufferReader reader(
       ::arrow::SliceBuffer(buffer, location.offset, location.length));
-  auto folded_filter =
-      parquet::BlockSplitBloomFilter::Deserialize(reader_properties, &reader);
+  auto filter = parquet::BlockSplitBloomFilter::Deserialize(reader_properties, &reader);
 
-  EXPECT_LT(folded_filter.GetBitsetSize(), initial_bitset_size);
-  EXPECT_EQ(BlockSplitBloomFilter::OptimalNumOfBytes(1000, bloom_filter_options.fpp),
-            folded_filter.GetBitsetSize());
+  EXPECT_EQ(BlockSplitBloomFilter::OptimalNumOfBytes(test_case.expected_bitset_ndv, kFpp),
+            filter.GetBitsetSize());
   for (uint64_t hash : hashes) {
-    EXPECT_TRUE(folded_filter.FindHash(hash));
+    EXPECT_TRUE(filter.FindHash(hash));
   }
 }
+
+INSTANTIATE_TEST_SUITE_P(
+    BloomFilterBuilder, BloomFilterBuilderFoldingTest,
+    ::testing::Values(BloomFilterBuilderFoldingTestCase{.ndv = 1'000'000,
+                                                        .fold = true,
+                                                        .inserted_count = 1000,
+                                                        .expected_bitset_ndv = 1000},
+                      BloomFilterBuilderFoldingTestCase{.ndv = 1'000'000,
+                                                        .fold = false,
+                                                        .inserted_count = 1000,
+                                                        .expected_bitset_ndv = 1'000'000},
+                      BloomFilterBuilderFoldingTestCase{.ndv = 1024,
+                                                        .fold = true,
+                                                        .inserted_count = 1024,
+                                                        .expected_bitset_ndv = 1024}));
 
 TEST(BloomFilterBuilder, InvalidOperations) {
   SchemaDescriptor schema;
@@ -205,7 +236,7 @@ TEST(BloomFilterBuilder, InvalidOperations) {
   schema.Init(root);
 
   WriterProperties::Builder properties_builder;
-  BloomFilterOptions bloom_filter_options{100, 0.05};
+  BloomFilterOptions bloom_filter_options{.ndv = 100, .fpp = 0.05};
   properties_builder.enable_bloom_filter("c1", bloom_filter_options);
   properties_builder.enable_bloom_filter("c2", bloom_filter_options);
   auto properties = properties_builder.build();

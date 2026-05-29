@@ -277,7 +277,7 @@ class PARQUET_EXPORT BlockSplitBloomFilter : public BloomFilter {
   void InsertHash(uint64_t hash) override;
   void InsertHashes(const uint64_t* hashes, int num_values) override;
   /// Fold the bloom filter down to the smallest size that still meets the target FPP
-  /// (False Positive Percentage).
+  /// (False Positive Probability).
   void FoldToTargetFpp(double target_fpp);
   void WriteTo(ArrowOutputStream* sink) const override;
   uint32_t GetBitsetSize() const override { return num_bytes_; }
@@ -353,7 +353,10 @@ class PARQUET_EXPORT BlockSplitBloomFilter : public BloomFilter {
 
  private:
   inline void InsertHashImpl(uint64_t hash);
-  uint32_t NumBlocks() const { return num_bytes_ / kBytesPerFilterBlock; }
+  uint32_t NumBlocks() const {
+    ARROW_DCHECK_EQ(num_bytes_ % kBytesPerFilterBlock, 0);
+    return num_bytes_ / kBytesPerFilterBlock;
+  }
   uint32_t NumFoldsForTargetFpp(double target_fpp) const;
   void Fold(uint32_t num_folds);
 

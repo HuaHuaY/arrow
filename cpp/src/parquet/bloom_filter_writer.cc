@@ -195,6 +195,7 @@ class BloomFilterBuilderImpl : public BloomFilterBuilder {
     struct BloomFilterEntry {
       std::unique_ptr<BlockSplitBloomFilter> filter;
       double target_fpp;
+      bool should_fold;
     };
 
     std::map</*column_id=*/int32_t, BloomFilterEntry> entries;
@@ -233,7 +234,8 @@ BloomFilter* BloomFilterBuilderImpl::CreateBloomFilter(int32_t column_ordinal) {
   return curr_rg_bfs
       .emplace(column_ordinal,
                RowGroupBloomFilters::BloomFilterEntry{.filter = std::move(bf),
-                                                      .target_fpp = opts->fpp})
+                                                      .target_fpp = opts->fpp,
+                                                      .should_fold = opts->fold})
       .first->second.filter.get();
 }
 
@@ -250,7 +252,9 @@ IndexLocations BloomFilterBuilderImpl::WriteTo(::arrow::io::OutputStream* sink) 
     for (auto& [column_id, entry] : row_group_bloom_filters) {
       // TODO(GH-43138): Determine the quality of bloom filter before writing it.
       PARQUET_ASSIGN_OR_THROW(int64_t offset, sink->Tell());
-      entry.filter->FoldToTargetFpp(entry.target_fpp);
+      if (entry.should_fold) {
+        entry.filter->FoldToTargetFpp(entry.target_fpp);
+      }
       entry.filter->WriteTo(sink);
       PARQUET_ASSIGN_OR_THROW(int64_t pos, sink->Tell());
 

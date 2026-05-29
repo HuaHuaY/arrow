@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -361,6 +362,10 @@ uint32_t BlockSplitBloomFilter::NumFoldsForTargetFpp(double target_fpp) const {
   }
   DCHECK_EQ(num_blocks & (num_blocks - 1), 0);
 
+  // Estimate the fill rate after folding from the current average fill rate.
+  // Folding ORs block groups together, so each fold changes the estimated fill rate
+  // from f to 1 - (1 - f)^2. A membership check tests kBitsSetPerBlock bits, making
+  // the estimated FPP equal to folded_fill_rate^kBitsSetPerBlock.
   uint64_t total_set_bits = 0;
   const auto* bitset32 = reinterpret_cast<const uint32_t*>(data_->data());
   const uint32_t num_words = num_bytes_ / static_cast<uint32_t>(sizeof(uint32_t));
@@ -377,11 +382,11 @@ uint32_t BlockSplitBloomFilter::NumFoldsForTargetFpp(double target_fpp) const {
   }
 
   uint32_t num_folds = 0;
-  double one_minus_fk = 1.0 - avg_fill;
+  double unset_probability_after_folds = 1.0 - avg_fill;
   for (uint32_t i = 0; i < max_folds; ++i) {
-    one_minus_fk *= one_minus_fk;
-    const double fk = 1.0 - one_minus_fk;
-    const double estimated_fpp = std::pow(fk, kBitsSetPerBlock);
+    unset_probability_after_folds *= unset_probability_after_folds;
+    const double folded_fill_rate = 1.0 - unset_probability_after_folds;
+    const double estimated_fpp = std::pow(folded_fill_rate, kBitsSetPerBlock);
     if (estimated_fpp > target_fpp) {
       break;
     }
@@ -401,13 +406,19 @@ void BlockSplitBloomFilter::Fold(uint32_t num_folds) {
   auto* bitset32 = reinterpret_cast<uint32_t*>(data_->mutable_data());
 
   for (uint32_t dst_block = 0; dst_block < new_num_blocks; ++dst_block) {
+    uint32_t* dst = bitset32 + dst_block * kBitsSetPerBlock;
+
     const uint32_t src_block = dst_block * group_size;
-    for (int word = 0; word < kBitsSetPerBlock; ++word) {
-      uint32_t merged = bitset32[src_block * kBitsSetPerBlock + word];
-      for (uint32_t fold_block = 1; fold_block < group_size; ++fold_block) {
-        merged |= bitset32[(src_block + fold_block) * kBitsSetPerBlock + word];
+    const uint32_t* src = bitset32 + src_block * kBitsSetPerBlock;
+    if (dst != src) {
+      std::copy_n(src, kBitsSetPerBlock, dst);
+    }
+
+    for (uint32_t fold_block = 1; fold_block < group_size; ++fold_block) {
+      src = bitset32 + (src_block + fold_block) * kBitsSetPerBlock;
+      for (int word = 0; word < kBitsSetPerBlock; ++word) {
+        dst[word] |= src[word];
       }
-      bitset32[dst_block * kBitsSetPerBlock + word] = merged;
     }
   }
 

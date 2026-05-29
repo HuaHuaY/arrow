@@ -174,14 +174,12 @@ static constexpr SizeStatisticsLevel DEFAULT_SIZE_STATISTICS_LEVEL =
 struct PARQUET_EXPORT BloomFilterOptions {
   /// Expected number of distinct values (NDV) in the bloom filter.
   ///
-  /// Bloom filters are most effective for high-cardinality columns. A good default
-  /// is to set ndv equal to the number of rows. If unset, the writer resolves ndv
-  /// to the max row group row count. Lower values reduce disk usage but may not
-  /// be worthwhile for very small NDVs.
+  /// Bloom filters are most effective for high-cardinality columns. If unset, the
+  /// writer resolves ndv to the max row group row count. Lower values reduce disk
+  /// usage but may not be worthwhile for very small NDVs.
   ///
-  /// Increasing ndv (without increasing fpp) increases memory usage. The writer
-  /// may fold the filter before serialization, but will not grow an undersized
-  /// filter.
+  /// Increasing ndv (without increasing fpp) increases memory usage. Folding only
+  /// shrinks a filter before serialization; it will not grow an undersized filter.
   std::optional<int64_t> ndv = std::nullopt;
 
   /// False-positive probability (FPP) of the bloom filter.
@@ -206,6 +204,20 @@ struct PARQUET_EXPORT BloomFilterOptions {
   /// | 10,000,000 | 0.05  | 13.4     | 16384 KiB |
   /// | 10,000,000 | 0.01  | 13.4     | 16384 KiB |
   double fpp = 0.05;
+
+  /// Whether to fold the bloom filter before writing it.
+  ///
+  /// If true, the writer may fold the filter before serialization to reduce disk
+  /// usage while preserving the target fpp estimate. Highly skewed block occupancy
+  /// can make this estimate optimistic; disable folding to preserve the initial
+  /// filter size.
+  ///
+  /// The writer resolves unset ndv as follows:
+  /// - fold=true, ndv unset: use the max row group row count and try to fold.
+  /// - fold=true, ndv set: use the explicit ndv and try to fold.
+  /// - fold=false, ndv unset: use the max row group row count and do not fold.
+  /// - fold=false, ndv set: use the explicit ndv and do not fold.
+  bool fold = true;
 };
 
 class PARQUET_EXPORT ColumnProperties {
@@ -255,7 +267,7 @@ class PARQUET_EXPORT ColumnProperties {
   }
 
   void set_bloom_filter_options(const BloomFilterOptions& bloom_filter_options) {
-    if (bloom_filter_options.fpp >= 1.0 || bloom_filter_options.fpp <= 0.0) {
+    if (!(bloom_filter_options.fpp > 0.0 && bloom_filter_options.fpp < 1.0)) {
       throw ParquetException(
           "Bloom filter false positive probability must be in (0.0, 1.0), got " +
           std::to_string(bloom_filter_options.fpp));

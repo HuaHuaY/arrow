@@ -18,6 +18,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <limits>
 #include <optional>
 #include <string>
 
@@ -121,6 +122,7 @@ TEST(TestWriterProperties, SetCodecOptions) {
 TEST(TestWriterProperties, BloomFilterNdvDefaults) {
   BloomFilterOptions options;
   ASSERT_FALSE(options.ndv.has_value());
+  ASSERT_TRUE(options.fold);
   options.fpp = 0.05;
 
   auto props = WriterProperties::Builder()
@@ -133,6 +135,7 @@ TEST(TestWriterProperties, BloomFilterNdvDefaults) {
   ASSERT_TRUE(resolved->ndv.has_value());
   ASSERT_EQ(12345, resolved->ndv.value());
   ASSERT_EQ(options.fpp, resolved->fpp);
+  ASSERT_TRUE(resolved->fold);
 }
 
 TEST(TestWriterProperties, BloomFilterExplicitNdv) {
@@ -149,6 +152,37 @@ TEST(TestWriterProperties, BloomFilterExplicitNdv) {
   ASSERT_EQ(777, resolved->ndv.value());
 }
 
+TEST(TestWriterProperties, BloomFilterNdvDefaultWithoutFolding) {
+  BloomFilterOptions options{.ndv = std::nullopt, .fpp = 0.05, .fold = false};
+
+  auto props = WriterProperties::Builder()
+                   .max_row_group_length(12345)
+                   ->enable_bloom_filter("a", options)
+                   ->build();
+
+  const auto resolved = props->bloom_filter_options(ColumnPath::FromDotString("a"));
+  ASSERT_TRUE(resolved.has_value());
+  ASSERT_TRUE(resolved->ndv.has_value());
+  ASSERT_EQ(12345, resolved->ndv.value());
+  ASSERT_EQ(options.fpp, resolved->fpp);
+  ASSERT_FALSE(resolved->fold);
+}
+
+TEST(TestWriterProperties, BloomFilterExplicitNdvWithoutFolding) {
+  BloomFilterOptions options{.ndv = 777, .fpp = 0.05, .fold = false};
+
+  auto props = WriterProperties::Builder()
+                   .max_row_group_length(12345)
+                   ->enable_bloom_filter("a", options)
+                   ->build();
+
+  const auto resolved = props->bloom_filter_options(ColumnPath::FromDotString("a"));
+  ASSERT_TRUE(resolved.has_value());
+  ASSERT_TRUE(resolved->ndv.has_value());
+  ASSERT_EQ(777, resolved->ndv.value());
+  ASSERT_FALSE(resolved->fold);
+}
+
 TEST(TestWriterProperties, BloomFilterRejectsNegativeNdv) {
   BloomFilterOptions options{.ndv = -1, .fpp = 0.05};
 
@@ -158,6 +192,29 @@ TEST(TestWriterProperties, BloomFilterRejectsNegativeNdv) {
       ::testing::Property(
           &ParquetException::what,
           ::testing::HasSubstr("Bloom filter number of distinct values must be >= 0")));
+}
+
+TEST(TestWriterProperties, BloomFilterRejectsNanFpp) {
+  BloomFilterOptions options{.ndv = 777, .fpp = std::numeric_limits<double>::quiet_NaN()};
+
+  EXPECT_THROW_THAT(
+      [&]() { WriterProperties::Builder().enable_bloom_filter("a", options)->build(); },
+      ParquetException,
+      ::testing::Property(
+          &ParquetException::what,
+          ::testing::HasSubstr(
+              "Bloom filter false positive probability must be in (0.0, 1.0)")));
+}
+
+TEST(TestWriterProperties, BloomFilterAllowsZeroNdv) {
+  BloomFilterOptions options{.ndv = 0, .fpp = 0.05};
+
+  auto props = WriterProperties::Builder().enable_bloom_filter("a", options)->build();
+
+  const auto resolved = props->bloom_filter_options(ColumnPath::FromDotString("a"));
+  ASSERT_TRUE(resolved.has_value());
+  ASSERT_TRUE(resolved->ndv.has_value());
+  ASSERT_EQ(0, resolved->ndv.value());
 }
 
 TEST(TestWriterProperties, ContentDefinedChunkingSettings) {
@@ -271,6 +328,7 @@ TEST_P(WriterPropertiesTest, RoundTripThroughBuilder) {
     if (bloom_filter_options.has_value()) {
       ASSERT_EQ(round_tripped_bloom_filter_options->ndv, bloom_filter_options->ndv);
       ASSERT_EQ(round_tripped_bloom_filter_options->fpp, bloom_filter_options->fpp);
+      ASSERT_EQ(round_tripped_bloom_filter_options->fold, bloom_filter_options->fold);
     }
   }
 }
@@ -342,8 +400,8 @@ std::vector<WriterPropertiesTestCase> writer_properties_test_cases() {
   {
     WriterProperties::Builder builder;
     builder.max_row_group_length(12345);
-    builder.enable_bloom_filter(column_a,
-                                BloomFilterOptions{.ndv = std::nullopt, .fpp = 0.05});
+    builder.enable_bloom_filter(
+        column_a, BloomFilterOptions{.ndv = std::nullopt, .fpp = 0.05, .fold = false});
     test_cases.emplace_back(builder.build(), "bloom_filter_column_override");
   }
 
