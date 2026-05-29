@@ -365,7 +365,10 @@ uint32_t BlockSplitBloomFilter::NumFoldsForTargetFpp(double target_fpp) const {
   // Estimate the fill rate after folding from the current average fill rate.
   // Folding ORs block groups together, so each fold changes the estimated fill rate
   // from f to 1 - (1 - f)^2. A membership check tests kBitsSetPerBlock bits, making
-  // the estimated FPP equal to folded_fill_rate^kBitsSetPerBlock.
+  // the estimated FPP equal to std::pow(folded_fill_rate, kBitsSetPerBlock).
+  //
+  // See also: Sailhan and Stehr, "Folding and Unfolding Bloom Filters", 2012:
+  // https://hal.science/hal-01126174v1
   uint64_t total_set_bits = 0;
   const auto* bitset32 = reinterpret_cast<const uint32_t*>(data_->data());
   const uint32_t num_words = num_bytes_ / static_cast<uint32_t>(sizeof(uint32_t));

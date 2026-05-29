@@ -212,11 +212,14 @@ struct PARQUET_EXPORT BloomFilterOptions {
   /// can make this estimate optimistic; disable folding to preserve the initial
   /// filter size.
   ///
-  /// The writer resolves unset ndv as follows:
-  /// - fold=true, ndv unset: use the max row group row count and try to fold.
-  /// - fold=true, ndv set: use the explicit ndv and try to fold.
-  /// - fold=false, ndv unset: use the max row group row count and do not fold.
-  /// - fold=false, ndv set: use the explicit ndv and do not fold.
+  /// The writer resolves ndv and fold behavior as follows:
+  ///
+  /// | fold  | ndv       | Resolved ndv             | Write behavior |
+  /// |:------|:----------|:-------------------------|:---------------|
+  /// | true  | unset     | max row group row count  | try to fold    |
+  /// | true  | specified | specified ndv            | try to fold    |
+  /// | false | unset     | max row group row count  | do not fold    |
+  /// | false | specified | specified ndv            | do not fold    |
   bool fold = true;
 };
 
