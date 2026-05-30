@@ -376,8 +376,8 @@ uint32_t BlockSplitBloomFilter::NumFoldsForTargetFpp(double target_fpp) const {
     total_set_bits += static_cast<uint64_t>(std::popcount(bitset32[i]));
   }
 
-  const double avg_fill =
-      static_cast<double>(total_set_bits) / (static_cast<double>(num_blocks) * 256.0);
+  const double avg_fill = static_cast<double>(total_set_bits) /
+                          (static_cast<double>(num_blocks) * kBytesPerFilterBlock * 8);
   const auto max_folds = static_cast<uint32_t>(std::countr_zero(num_blocks));
 
   if (avg_fill == 0.0) {
